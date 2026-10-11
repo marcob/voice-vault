@@ -8,8 +8,7 @@ import android.net.Uri
  * folder the user picked once via the system folder picker. Stored as a string in a
  * small `SharedPreferences` file; resolved back to a `DocumentFile` on every access.
  *
- * There is no `.complete`-marker dance here (unlike [dev.cazimir.voicevault.transcribe.ModelProvisioner]):
- * this is one small key write, not a large download that can be observed half-finished.
+ * Existing preference keys are retained so upgrades keep the selected output folder.
  */
 object VaultGrant {
 

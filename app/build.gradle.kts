@@ -60,7 +60,7 @@ android {
         release {
             // R8 code + resource shrinking. Uses the stable legacy DSL rather than AGP 9's
             // optimization{} block, which still needs the experimental android.r8.gradual.support
-            // flag. Keep rules (incl. the whisper JNI surface and -dontobfuscate) live in
+            // flag. Keep rules (including -dontobfuscate) live in
             // proguard-rules.pro.
             isMinifyEnabled = true
             isShrinkResources = true
@@ -97,7 +97,6 @@ dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.documentfile)
     implementation(libs.androidx.lifecycle.runtime.ktx)
-    implementation(libs.whisper.android)
     implementation(libs.kotlinx.coroutines.android)
     testImplementation(libs.junit)
     androidTestImplementation(platform(libs.androidx.compose.bom))

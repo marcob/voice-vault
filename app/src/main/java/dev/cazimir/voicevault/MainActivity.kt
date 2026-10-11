@@ -26,14 +26,12 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
@@ -49,8 +47,6 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import dev.cazimir.voicevault.capture.RecordingService
 import dev.cazimir.voicevault.notify.CaptureNotifications
-import dev.cazimir.voicevault.transcribe.ModelDownloadState
-import dev.cazimir.voicevault.transcribe.ModelDownloader
 import dev.cazimir.voicevault.ui.theme.BrandIndigo
 import dev.cazimir.voicevault.ui.theme.BrandPurple
 import dev.cazimir.voicevault.ui.theme.BrandViolet
@@ -61,8 +57,8 @@ import dev.cazimir.voicevault.vault.VaultWriter
 
 /**
  * Not part of the capture flow itself - this screen only exists to grant the
- * permissions capture depends on, to pick the vault folder, to select Voice Vault as the
- * digital assistant, and to fetch the speech model on first launch. Each step shows
+ * permissions capture depends on, to pick the output folder and select Voice Vault as the
+ * digital assistant. Each step shows
  * whether it is done. Also kicks off a retry scan for any audio left pending from a
  * previous failure.
  */
@@ -70,10 +66,6 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-
-        // Starts immediately rather than on a button press: without the model nothing
-        // can be transcribed, so there is no reason to make the user ask for it.
-        ModelDownloader.ensureDownloaded(this)
 
         retryPending()
 
@@ -165,7 +157,6 @@ private fun SetupScreen(openPickerOnLaunch: Boolean, modifier: Modifier = Modifi
         }
     }
     val assistantDone = remember(refreshKey) { isAssistantRoleHeld(context) }
-    val modelState by ModelDownloader.state.collectAsState()
 
     Column(
         modifier = modifier
@@ -187,20 +178,20 @@ private fun SetupScreen(openPickerOnLaunch: Boolean, modifier: Modifier = Modifi
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(
-                    "Voice Vault",
+                    "MB-VoiceVault",
                     style = MaterialTheme.typography.headlineMedium,
                     fontWeight = FontWeight.SemiBold,
                     color = Color.White
                 )
                 Text(
-                    "Eyes-free voice notes, straight into your vault.",
+                    "Eyes-free recordings, saved as compact Opus audio files.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = Color.White.copy(alpha = 0.9f)
                 )
             }
         }
         Text(
-            "Work down these four steps. Capture needs all of them.",
+            "Work down these three steps. Recording works fully offline.",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -215,20 +206,14 @@ private fun SetupScreen(openPickerOnLaunch: Boolean, modifier: Modifier = Modifi
 
         SetupStep(
             number = 2,
-            title = "Vault folder",
+            title = "Output audio file folder",
             done = vaultAccess is VaultAccess.Available,
             detail = when (vaultAccess) {
                 is VaultAccess.Available -> buildString {
-                    append("Writing notes into: ")
+                    append("Saving audio into: ")
                     append(vaultFolder?.displayPath ?: "the folder you picked")
-                    if (vaultFolder?.looksLikeVaultRoot == true) {
-                        append(
-                            "\nThis looks like your vault root - notes will land directly here, " +
-                                "not in an inbox subfolder. Pick the subfolder instead if that is not what you want."
-                        )
-                    }
                 }
-                is VaultAccess.NotConfigured -> "Pick your Obsidian vault's inbox folder."
+                is VaultAccess.NotConfigured -> "Choose where to save your .ogg audio files."
                 is VaultAccess.Lost -> "The folder you picked can no longer be reached. Pick it again."
             }
         ) {
@@ -241,7 +226,7 @@ private fun SetupScreen(openPickerOnLaunch: Boolean, modifier: Modifier = Modifi
             number = 3,
             title = "Digital assistant",
             done = assistantDone,
-            detail = "Set Voice Vault as the assistant app so a power-button hold starts a capture."
+            detail = "Set MB-VoiceVault as the assistant app so a power-button hold starts a capture."
         ) {
             Button(onClick = {
                 context.startActivity(Intent(Settings.ACTION_VOICE_INPUT_SETTINGS))
@@ -250,19 +235,9 @@ private fun SetupScreen(openPickerOnLaunch: Boolean, modifier: Modifier = Modifi
             }
         }
 
-        SetupStep(
-            number = 4,
-            title = "Speech model",
-            done = modelState is ModelDownloadState.Ready,
-            detail = "About 57 MB, downloaded once. Capture works fully offline after this."
-        ) {
-            ModelStepControls(modelState)
-        }
-
         val allDone = permsDone &&
             vaultAccess is VaultAccess.Available &&
-            assistantDone &&
-            modelState is ModelDownloadState.Ready
+            assistantDone
         if (allDone) {
             Surface(
                 color = MaterialTheme.colorScheme.primaryContainer,
@@ -318,48 +293,5 @@ private fun SetupStep(
             )
         }
         action()
-    }
-}
-
-@Composable
-private fun ModelStepControls(state: ModelDownloadState) {
-    val context = androidx.compose.ui.platform.LocalContext.current
-
-    // Anything captured before the model arrived is sitting in pending/ untranscribed;
-    // the download finishing is exactly the moment a retry can finally succeed.
-    LaunchedEffect(state) {
-        if (state is ModelDownloadState.Ready) {
-            context.startService(
-                Intent(context, RecordingService::class.java).apply {
-                    action = RecordingService.ACTION_RETRY_PENDING
-                }
-            )
-        }
-    }
-
-    when (state) {
-        is ModelDownloadState.Ready -> Text("Model ready.")
-
-        is ModelDownloadState.Downloading -> {
-            Text("Downloading… ${(state.fraction * 100).toInt()}%")
-            LinearProgressIndicator(
-                progress = { state.fraction },
-                modifier = Modifier.fillMaxWidth()
-            )
-        }
-
-        is ModelDownloadState.Failed -> {
-            Text("Download failed: ${state.message}")
-            Button(onClick = { ModelDownloader.ensureDownloaded(context) }) {
-                Text("Retry download")
-            }
-        }
-
-        is ModelDownloadState.Missing -> {
-            Text("Model not downloaded yet.")
-            Button(onClick = { ModelDownloader.ensureDownloaded(context) }) {
-                Text("Download model")
-            }
-        }
     }
 }

@@ -12,9 +12,7 @@ import java.io.IOException
  * through the persisted tree URI in [VaultGrant]. Resolution is attempted on every call so a
  * grant that goes away mid-session surfaces as [VaultAccess.Lost] rather than a stale handle.
  *
- * Scoped to a folder on local/shared device storage (see the change's Non-Goals) - that is
- * where an Obsidian vault lives, and where `DocumentsContract.renameDocument` behaves like a
- * filesystem rename.
+ * Output is published through a temporary document followed by a provider rename.
  */
 class SafVaultStorage(context: Context) : VaultStorage {
 
@@ -44,7 +42,7 @@ class SafVaultStorage(context: Context) : VaultStorage {
         val dir = inbox ?: return null
         val treeUri = VaultGrant.stored(appContext) ?: return null
 
-        // Tree document id is "<volume>:<relative/path>", e.g. "primary:Obsidian/.../00-Inbox".
+        // Tree document id is "<volume>:<relative/path>".
         val docId = try {
             DocumentsContract.getTreeDocumentId(treeUri)
         } catch (t: Throwable) {
@@ -54,10 +52,43 @@ class SafVaultStorage(context: Context) : VaultStorage {
             ?: dir.name
             ?: "selected folder"
 
-        val looksLikeVaultRoot = dir.listFiles().any { it.isDirectory && it.name == ".obsidian" }
-
-        return VaultFolderInfo(displayPath, looksLikeVaultRoot)
+        return VaultFolderInfo(displayPath)
     }
+
+    override fun writeAudio(fileName: String, source: java.io.File) {
+        val dir = inbox ?: throw IOException("output folder is not accessible")
+        dir.findFile(fileName)?.let {
+            if (it.isFile) return
+            throw IOException("output name is already used by a folder: $fileName")
+        }
+        // Keep the audio MIME type and its extension consistent for SAF providers.
+        // Hidden temporary name prevents media scanners treating it as finished output.
+        val partialName = ".$fileName.partial.ogg"
+        dir.findFile(partialName)?.let {
+            if (!it.delete()) throw IOException("could not remove $partialName")
+        }
+        val partial = dir.createFile("audio/ogg", partialName)
+            ?: throw IOException("could not create $partialName")
+        try {
+            resolver.openOutputStream(partial.uri, "wt")?.use { out ->
+                source.inputStream().use { it.copyTo(out) }
+                out.flush()
+            } ?: throw IOException("could not open $partialName")
+            if (DocumentsContract.renameDocument(resolver, partial.uri, fileName) == null &&
+                dir.findFile(fileName)?.isFile != true) {
+                throw IOException("could not rename $partialName")
+            }
+        } catch (t: Throwable) {
+            partial.delete()
+            throw t
+        }
+    }
+
+    override fun audioExists(fileName: String): Boolean = inbox?.findFile(fileName)?.isFile == true
+
+    override fun audioBaseNames(): List<String> = inbox?.listFiles()
+        ?.filter { it.isFile && it.name?.endsWith(".ogg") == true && it.name?.startsWith(".") == false }
+        ?.mapNotNull { it.name?.removeSuffix(".ogg") }.orEmpty()
 
     override fun writeNote(fileName: String, content: String) {
         val dir = inbox ?: throw IOException("vault folder is not accessible")

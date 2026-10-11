@@ -1,5 +1,6 @@
 *.iml
 .gradle
+.kotlin/
 /local.properties
 /.idea/
 .DS_Store
@@ -8,8 +9,7 @@
 .externalNativeBuild
 .cxx
 local.properties
-# Whisper models are ~57 MB each and are downloaded by the app on first launch
-# (Config.MODEL_DOWNLOAD_URL), never committed.
+# Keep any locally retained legacy model binaries out of git.
 /models
 *.bin
 

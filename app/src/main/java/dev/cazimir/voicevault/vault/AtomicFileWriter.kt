@@ -4,7 +4,7 @@ import java.io.File
 import java.io.IOException
 
 /**
- * Writes to a temp file and renames into place, so a sync client (Obsidian Sync,
+ * Writes to a temp file and renames into place, so a sync client (for example,
  * Syncthing) watching the vault never observes a partially written file.
  */
 object AtomicFileWriter {

@@ -14,9 +14,8 @@ data class NoteSummary(val captureId: String, val body: String)
  * The vault's write surface. Two storage tiers on purpose:
  *
  * - Finished `.md` notes go into the user-selected folder over SAF ([VaultStorage]).
- * - A capture's `.wav` and its diagnostic `.log` wait in `context.filesDir/pending/` as
- *   plain files: whisper needs a real filesystem path, and orphan/partial audio must never
- *   appear in the user's synced vault. See the `migrate-vault-to-saf` design doc.
+ * - A capture's `.wav` and diagnostic `.log` stay in `context.filesDir/pending/`
+ *   until its compressed `.ogg` audio has been published successfully.
  *
  * Vault-touching methods take a [Context] and build a [SafVaultStorage] from it; `internal`
  * overloads take a [VaultStorage] directly so unit tests can pass a fake.
@@ -65,6 +64,20 @@ object VaultWriter {
 
     // --- vault notes: SAF ---
 
+    fun writeAudio(context: Context, source: File, captureId: String) =
+        writeAudio(storage(context), source, captureId)
+
+    internal fun writeAudio(storage: VaultStorage, source: File, captureId: String) =
+        storage.writeAudio("$captureId.ogg", source)
+
+    /** Allocates a name and persists its WAV under the same lock across capture sessions. */
+    @Synchronized
+    fun persistCapture(context: Context, wavBytes: ByteArray): File =
+        writePendingAudio(context, wavBytes, captureIdFor(context))
+
+    fun audioExists(context: Context, captureId: String): Boolean =
+        storage(context).audioExists("$captureId.ogg")
+
     /** Whether the persisted folder grant currently resolves to a writable folder. */
     fun vaultAccess(context: Context): VaultAccess = storage(context).access()
 
@@ -78,7 +91,7 @@ object VaultWriter {
 
     /**
      * Prepends [Config.NOTE_FRONTMATTER_TEMPLATE] (with the capture date filled in) to the
-     * transcript. The template is intentionally minimal so notes fit any vault; edit it in
+     * typed Quick Note. The template is intentionally minimal; edit it in
      * `Config.kt` to add your own keys.
      */
     fun writeNote(context: Context, text: String, captureId: String) =
@@ -119,7 +132,7 @@ object VaultWriter {
     internal fun captureIdFor(storage: VaultStorage, pendingDir: File, timestamp: Date = Date()): String {
         val formatter = SimpleDateFormat("yyyy-MM-dd HHmm", Locale.US)
         val base = formatter.format(timestamp)
-        val takenNoteBases = storage.noteBaseNames().toHashSet()
+        val takenNoteBases = (storage.noteBaseNames() + storage.audioBaseNames()).toHashSet()
         var candidate = base
         var suffix = 1
         while (candidate in takenNoteBases || File(pendingDir, "$candidate.wav").exists()) {

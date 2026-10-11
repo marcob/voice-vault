@@ -1,73 +1,21 @@
 package dev.cazimir.voicevault.notify
 
-import dev.cazimir.voicevault.transcribe.TranscriptionOutcome
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Test
 
 class CaptureNotificationsTest {
-
     @Test
-    fun `no-speech routes to the low-importance channel`() {
-        assertEquals(
-            CaptureNotifications.NO_SPEECH_CHANNEL_ID,
-            CaptureNotifications.channelFor(TranscriptionOutcome.NoSpeech(""))
-        )
+    fun `failure title identifies the recording`() {
+        assertEquals("Recording needs attention · 2026-10-10 1200",
+            CaptureNotifications.genericTitle("2026-10-10 1200"))
+        assertEquals("Recording needs attention", CaptureNotifications.genericTitle(null))
     }
 
     @Test
-    fun `genuine failures route to the high-importance failure channel`() {
-        assertEquals(
-            CaptureNotifications.FAILURE_CHANNEL_ID,
-            CaptureNotifications.channelFor(TranscriptionOutcome.TranscribeFailed(RuntimeException()))
-        )
-        assertEquals(
-            CaptureNotifications.FAILURE_CHANNEL_ID,
-            CaptureNotifications.channelFor(TranscriptionOutcome.NoteWriteFailed(RuntimeException()))
-        )
-        assertEquals(
-            CaptureNotifications.FAILURE_CHANNEL_ID,
-            CaptureNotifications.channelFor(TranscriptionOutcome.ModelUnavailable(null))
-        )
-    }
-
-    @Test
-    fun `no-speech title names it as such and carries the capture id`() {
-        assertEquals(
-            "No speech · 2026-08-23 1417",
-            CaptureNotifications.titleFor(TranscriptionOutcome.NoSpeech(""), "2026-08-23 1417")
-        )
-    }
-
-    @Test
-    fun `no-speech title survives a disambiguated capture id`() {
-        assertEquals(
-            "No speech · 2026-08-23 1417 (2)",
-            CaptureNotifications.titleFor(TranscriptionOutcome.NoSpeech(""), "2026-08-23 1417 (2)")
-        )
-    }
-
-    @Test
-    fun `genuine failure titles say a note needs attention`() {
-        assertEquals(
-            "Note needs attention · 2026-08-23 1417",
-            CaptureNotifications.titleFor(TranscriptionOutcome.TranscribeFailed(RuntimeException()), "2026-08-23 1417")
-        )
-        assertEquals(
-            "Note needs attention · 2026-08-23 1417",
-            CaptureNotifications.titleFor(TranscriptionOutcome.NoteWriteFailed(RuntimeException()), "2026-08-23 1417")
-        )
-        assertEquals(
-            "Note needs attention · 2026-08-23 1417",
-            CaptureNotifications.titleFor(TranscriptionOutcome.ModelUnavailable(null), "2026-08-23 1417")
-        )
-    }
-
-    @Test
-    fun `a null capture id falls back to the bare title`() {
-        assertEquals(
-            "Note needs attention",
-            CaptureNotifications.titleFor(TranscriptionOutcome.TranscribeFailed(RuntimeException()), null)
-        )
-        assertEquals("Note needs attention", CaptureNotifications.genericTitle(null))
+    fun `capture notification ids avoid reserved ids`() {
+        for (id in listOf("\u0001", "\u0002", "\u0003", "2026-10-10 1200")) {
+            assertFalse(CaptureNotifications.failureNotificationId(id) in 1..3)
+        }
     }
 }

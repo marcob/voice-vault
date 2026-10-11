@@ -18,11 +18,20 @@ class VaultWriterTest {
         private val seeded: List<RawNote> = emptyList()
     ) : VaultStorage {
         val written = linkedMapOf<String, String>()
+        val audio = linkedMapOf<String, ByteArray>()
+
+        override fun writeAudio(fileName: String, source: File) {
+            if (accessState !is VaultAccess.Available) throw IOException("output not accessible")
+            audio.putIfAbsent(fileName, source.readBytes())
+        }
+
+        override fun audioExists(fileName: String): Boolean = fileName in audio
+        override fun audioBaseNames(): List<String> = audio.keys.map { it.removeSuffix(".ogg") }
 
         override fun access(): VaultAccess = accessState
 
         override fun folderInfo(): VaultFolderInfo? =
-            if (accessState is VaultAccess.Available) VaultFolderInfo("Obsidian/00-Inbox", false) else null
+            if (accessState is VaultAccess.Available) VaultFolderInfo("Recordings/Inbox") else null
 
         override fun writeNote(fileName: String, content: String) {
             if (accessState !is VaultAccess.Available) throw IOException("vault not accessible")
@@ -41,6 +50,37 @@ class VaultWriterTest {
 
     private fun timestampOf(value: String) =
         SimpleDateFormat("yyyy-MM-dd HHmm", Locale.US).parse(value)!!
+
+    @Test
+    fun `audio output is binary ogg and names avoid existing recordings`() {
+        val storage = FakeVaultStorage()
+        val dir = createTempDir()
+        try {
+            val source = File(dir, "source").apply { writeBytes(byteArrayOf(0, 1, -1, 42)) }
+            VaultWriter.writeAudio(storage, source, "2026-10-10 1200")
+            assertTrue(source.readBytes().contentEquals(storage.audio.getValue("2026-10-10 1200.ogg")))
+            assertTrue(storage.written.isEmpty())
+            assertEquals("2026-10-10 1200 (2)",
+                VaultWriter.captureIdFor(storage, dir, timestampOf("2026-10-10 1200")))
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `audio write failure preserves its source`() {
+        val source = File.createTempFile("opus", ".ogg")
+        try {
+            source.writeText("audio")
+            try {
+                VaultWriter.writeAudio(FakeVaultStorage(VaultAccess.Lost), source, "capture")
+                fail("expected inaccessible folder failure")
+            } catch (_: IOException) { }
+            assertEquals("audio", source.readText())
+        } finally {
+            source.delete()
+        }
+    }
 
     @Test
     fun `wav duration is derived from file size given the 44-byte header`() {
@@ -123,8 +163,7 @@ class VaultWriterTest {
             VaultWriter.writeNote(FakeVaultStorage(VaultAccess.Lost), "body\n", "2026-08-19 0900")
             fail("expected writeNote to throw when the vault grant is lost")
         } catch (expected: IOException) {
-            // the transcription queue turns this into NoteWriteFailed; capture start turns the
-            // equivalent access() check into the 5-second vibration + persistent notification
+            // The caller reports the storage failure without deleting user input.
         }
     }
 }

@@ -27,14 +27,9 @@ data class RawNote(val baseName: String, val content: String, val lastModified: 
  * The selected folder, described for the setup screen's confirmation line.
  *
  * @param displayPath the folder's path relative to its storage volume, e.g.
- *   `Obsidian/obsidian-personal/00-Inbox`, so the user can see at a glance they picked the
- *   right place (and not `Download` or the vault root).
- * @param looksLikeVaultRoot true when the folder directly contains a `.obsidian` directory,
- *   i.e. the user picked the whole vault rather than an inbox subfolder inside it. SAF only
- *   grants access to the picked subtree, so a `.obsidian` in a *parent* folder is invisible
- *   here - absence of this flag does not prove the pick is wrong.
+ *   `Recordings/Inbox`, so the user can confirm the selected output location.
  */
-data class VaultFolderInfo(val displayPath: String, val looksLikeVaultRoot: Boolean)
+data class VaultFolderInfo(val displayPath: String)
 
 /**
  * The SAF operations `VaultWriter` needs against the user-selected inbox folder. Kept to
@@ -43,6 +38,13 @@ data class VaultFolderInfo(val displayPath: String, val looksLikeVaultRoot: Bool
  * go through here - they stay `java.io.File`-based in `filesDir`.
  */
 interface VaultStorage {
+
+    /** Atomically publishes a complete Ogg Opus file, without replacing existing output. */
+    fun writeAudio(fileName: String, source: java.io.File)
+
+    fun audioExists(fileName: String): Boolean
+
+    fun audioBaseNames(): List<String>
 
     fun access(): VaultAccess
 

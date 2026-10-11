@@ -1,17 +1,17 @@
 package dev.cazimir.voicevault.capture
 
+import android.Manifest
 import android.app.Service
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.os.IBinder
 import android.util.Log
 import dev.cazimir.voicevault.Config
 import dev.cazimir.voicevault.notify.CaptureNotifications
-import dev.cazimir.voicevault.transcribe.ModelProvisioner
-import dev.cazimir.voicevault.transcribe.TranscriptionOutcome
-import dev.cazimir.voicevault.transcribe.TranscriptionQueue
+import dev.cazimir.voicevault.audio.AudioExportQueue
 import dev.cazimir.voicevault.vault.VaultWriter
 import dev.cazimir.voicevault.vault.WavEncoder
 import kotlinx.coroutines.CoroutineScope
@@ -19,13 +19,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
 /**
  * Owns one capture end to end: acquire the microphone, signal via haptics, stop on
- * silence/tap/screen-off/cap, persist audio before anything else, then hand off to transcription.
+ * silence/tap/screen-off/cap, persist audio before anything else, then export compressed audio.
  * Runs as a foreground service so recording survives the screen locking or the
  * phone being pocketed - the whole point of an eyes-free capture flow.
  */
@@ -56,6 +53,12 @@ class RecordingService : Service() {
     }
 
     private suspend fun runCapture(startId: Int) {
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            haptics.atRisk()
+            notifications.postFailure("Microphone permission is required. Open MB-VoiceVault to grant it.")
+            stopSelf(startId)
+            return
+        }
         startForeground(CaptureNotifications.STATUS_NOTIFICATION_ID, notifications.listeningNotification())
 
         if (!VaultWriter.isVaultReady(this)) {
@@ -65,7 +68,6 @@ class RecordingService : Service() {
             return
         }
 
-        serviceScope.launch { TranscriptionQueue.preload(applicationContext) }
         serviceScope.launch { retryPending(startId = -1) }
 
         val stop = ExternalStop()
@@ -109,85 +111,58 @@ class RecordingService : Service() {
         }
 
         val wav = WavEncoder.encode(result.pcm, result.sampleRateHz)
-        val captureId = VaultWriter.captureIdFor(this)
         val pendingFile = try {
-            VaultWriter.writePendingAudio(this, wav, captureId)
+            VaultWriter.persistCapture(this, wav)
         } catch (t: Throwable) {
-            Log.w(Config.LOG_TAG, "could not save recording for $captureId", t)
+            Log.w(Config.LOG_TAG, "could not save recording", t)
             haptics.atRisk()
             notifications.postFailure("Could not save the recording.")
             stopSelf(startId)
             return
         }
 
-        notifications.updateToTranscribing()
-        val outcome = TranscriptionQueue.transcribe(applicationContext, pendingFile)
-        handleOutcome(outcome, captureId)
+        notifications.updateToSaving()
+        exportPending(pendingFile)
         stopSelf(startId)
     }
 
     private suspend fun retryPending(startId: Int) {
-        // Retrying without a model can only fail, once per pending file - which would bury
-        // the user in failure notifications during the first-launch download.
-        if (!VaultWriter.isVaultReady(this) || !ModelProvisioner.isModelReady(this)) {
+        if (!VaultWriter.isVaultReady(this)) {
             if (startId >= 0) stopSelf(startId)
             return
         }
         val pendingFiles = VaultWriter.pendingAudioFiles(this)
-        // A failure notification only ever gets cleared when a later sweep finds and
-        // transcribes its file - clear anything whose file is no longer pending at all,
-        // including the three phantom alerts a broken build already left behind.
+        // Clear alerts for captures that are no longer pending.
         notifications.clearStaleFailures(pendingFiles.mapTo(mutableSetOf()) { it.nameWithoutExtension })
         for (file in pendingFiles) {
-            val captureId = file.nameWithoutExtension
-            val outcome = TranscriptionQueue.transcribe(applicationContext, file)
-            handleOutcome(outcome, captureId)
+            exportPending(file)
         }
         if (startId >= 0) stopSelf(startId)
     }
 
-    /** Reports (or silently clears) a classified transcription outcome for one capture. */
-    private fun handleOutcome(outcome: TranscriptionOutcome, captureId: String) {
-        if (outcome is TranscriptionOutcome.Success || outcome is TranscriptionOutcome.AlreadyHandled) {
+    private suspend fun exportPending(file: File) {
+        val captureId = file.nameWithoutExtension
+        try {
+            AudioExportQueue.export(applicationContext, file)
             notifications.cancelFailure(captureId)
-            return
-        }
-        // Belt-and-braces against the class of bug, not just the one race that caused it:
-        // if a note is already there by any path, this capture did not fail.
-        if (VaultWriter.noteExists(this, captureId)) {
-            notifications.cancelFailure(captureId)
-            return
-        }
-
-        VaultWriter.writeDiagnostic(this, captureId, diagnosticText(outcome, captureId))
-        val durationSeconds =
-            VaultWriter.wavDurationSeconds(File(VaultWriter.pendingDir(this), "$captureId.wav"))
-        val allowDiscard = outcome !is TranscriptionOutcome.ModelUnavailable
-        notifications.postFailure(outcome, captureId, durationSeconds, allowDiscard)
-
-        // The at-risk rumble means recorded speech is at risk of being lost. NoSpeech means
-        // there was no speech to lose, so it never buzzes - not on the first attempt, and
-        // not on any later retry sweep. Every other failure class always buzzes.
-        if (outcome !is TranscriptionOutcome.NoSpeech) {
+        } catch (t: Throwable) {
+            Log.w(Config.LOG_TAG, "audio export failed for $captureId", t)
+            if (!file.exists()) {
+                notifications.cancelFailure(captureId)
+                return
+            }
+            try {
+                VaultWriter.writeDiagnostic(this, captureId, "Audio export failed for $captureId\n${t.stackTraceToString()}")
+            } catch (diagnosticError: Throwable) {
+                Log.w(Config.LOG_TAG, "could not save diagnostic for $captureId", diagnosticError)
+            }
+            val seconds = VaultWriter.wavDurationSeconds(file).toInt()
+            notifications.postFailure(
+                "Could not export the ${seconds}s recording. Audio is saved locally and retries automatically.",
+                captureId
+            )
             haptics.atRisk()
         }
-    }
-
-    private fun diagnosticText(outcome: TranscriptionOutcome, captureId: String): String {
-        val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())
-        val detail = when (outcome) {
-            is TranscriptionOutcome.NoSpeech ->
-                "No speech detected. Whisper output: \"${outcome.rawText}\""
-            is TranscriptionOutcome.ModelUnavailable ->
-                "Speech model unavailable.\n${outcome.cause?.stackTraceToString().orEmpty()}"
-            is TranscriptionOutcome.TranscribeFailed ->
-                "Transcription error.\n${outcome.cause.stackTraceToString()}"
-            is TranscriptionOutcome.NoteWriteFailed ->
-                "Note write error.\n${outcome.cause.stackTraceToString()}"
-            is TranscriptionOutcome.Success, TranscriptionOutcome.AlreadyHandled ->
-                "" // handled before this is ever called
-        }
-        return "$timestamp  $captureId\n$detail\n"
     }
 
     /**

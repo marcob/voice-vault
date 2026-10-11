@@ -6,7 +6,7 @@ import android.speech.RecognitionService
 /**
  * The voice-interaction-service descriptor requires a recognitionService component
  * to exist, even though this app never drives speech through the classic
- * RecognitionService API - transcription happens entirely offline via whisper.
+ * RecognitionService API. The app only records audio and does not recognize speech.
  */
 class NoOpRecognitionService : RecognitionService() {
     override fun onStartListening(recognizerIntent: Intent?, listener: Callback?) {}
