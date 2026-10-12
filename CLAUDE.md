@@ -1,66 +1,60 @@
-# CLAUDE.md
+# MB-VoiceVault
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
-## What this is
-
-Voice Vault (package `dev.cazimir.voicevault`) is a Pixel-first (developed and verified on a Pixel 6 Pro, `arm64-v8a` only), eyes-free Android app that turns a power-button hold into a voice note: trigger → speak → pocket the phone → a Markdown file appears in an Obsidian vault. No screen interaction and no settings UI. Capture and transcription are fully offline; the app touches the network exactly once, holding `INTERNET` solely to download the ~57 MB speech model on first launch (see the network non-goal below). It is now released publicly as a signed APK, not just sideloaded to one device. See `openspec/changes/archive/2026-08-13-add-voice-note-capture/proposal.md` and `design.md` for the full rationale and accepted trade-offs — read `design.md`'s "Decisions" and "Risks / Trade-offs" sections before changing behavior in `assistant/`, `capture/`, or `vault/`, since most choices there (e.g. silence-based stop, audio-before-transcription ordering, screen-off as the stop gesture) were deliberate rejections of the "more correct" alternative. Note that `design.md` predates the `migrate-vault-to-saf` change (archived): the vault now uses the Storage Access Framework, so its original `MANAGE_EXTERNAL_STORAGE` decision no longer describes the code.
+Android app `dev.cazimir.voicevault` records eyes-free audio through the digital assistant gesture. It exports mono Ogg Opus at 24 kbps into a SAF-selected output folder. No transcription, model download or INTERNET permission.
 
 ## Commands
 
 ```bash
-./gradlew assembleDebug          # build debug APK
-./gradlew installDebug           # build and install on a connected device (primary target: Pixel 6 Pro)
-./gradlew test                   # JVM unit tests (app/src/test)
-./gradlew connectedAndroidTest   # instrumented tests on device (app/src/androidTest)
-./gradlew lint                   # Android lint
+./gradlew assembleDebug
+./gradlew installDebug
+./gradlew test
+./gradlew connectedAndroidTest
+./gradlew lint
 ```
 
-Distribution is a signed APK on GitHub Releases, built from the tagged commit by `.github/workflows/release.yml`. There is no test or PR CI, and behavior is still verified by sideloading to the physical Pixel 6 Pro rather than in the workflow. Many tasks in `openspec/changes/archive/2026-08-13-add-voice-note-capture/tasks.md` are marked incomplete specifically because they require a human with the physical device (feeling haptics, triggering via the real power button, observing the notification shade, etc.) — don't mark them done from code inspection alone.
+Android 10 or newer is required. The original capture flow was verified on a Pixel 6 Pro. Native Opus export needs physical device validation. Do not mark human/device tasks complete from code inspection.
 
 ## Git workflow
 
-- **Never create branches.** Commit directly to `main`, even for multi-commit changes. This overrides any default about branching before committing on the default branch.
-- **No PRs.** There is no CI, no remote review, and one developer — a PR would only add a step between a commit and a sideload.
-- Stage deliberately rather than with `git add -A`: OpenSpec changes authored in another session can be sitting untracked in the tree, and sweeping them into an unrelated commit is easy to do and annoying to unpick.
+- Never create branches. Work directly on `main`.
+- No PRs.
+- Stage deliberately. Untracked specs or instructions may belong to another session.
+- Do not commit or push unless asked.
 
-## OpenSpec workflow
+## OpenSpec
 
-This repo uses OpenSpec (`openspec/`) for spec-driven change proposals. `openspec/specs/` holds the finalized specs (`assistant-trigger`, `offline-transcription`, `vault-writing`, `voice-capture`); `openspec/changes/archive/2026-08-13-add-voice-note-capture/` holds the proposal, design doc, and task checklist that produced them. Use the `openspec-*` skills for proposing, exploring, or archiving changes rather than editing these files free-hand.
+Use the `openspec-*` skills to manage changes. The current audio-export change is `openspec/changes/save-opus-audio/`. Archived designs describe historical behavior; the audio-export design supersedes transcription assumptions.
 
 ## Architecture
 
-The flow is a strict pipeline with a durability checkpoint in the middle. Each stage is owned by one package:
-
+```text
+assistant gesture
+  -> assistant/ starts RecordingService
+  -> capture/ records PCM16 mono, 16 kHz
+  -> vault/ atomically persists WAV in filesDir/pending/
+  -> audio/ serializes native Opus encoding
+  -> vault/ atomically publishes .ogg through SAF
+  -> pending WAV and diagnostic removed only after success
 ```
-power-button hold
-  → assistant/  (VoiceInteractionService, renders no UI, immediately starts a foreground service)
-  → capture/    (RecordingService: foreground service, owns the mic, haptics, stop conditions)
-  → vault/      (WAV written into filesDir/pending/ — app-private, audio is now unlosable)
-  → transcribe/ (TranscriptionQueue serializes access to one loaded whisper model)
-  → vault/      (Markdown note written to the SAF-selected folder, pending WAV deleted)
-```
 
-- **`assistant/`** — `VoiceVaultVoiceInteractionService` + `VoiceVaultVoiceInteractionSessionService` + `VoiceVaultVoiceInteractionSession` register Voice Vault as the system digital assistant (`res/xml/interaction_service.xml`, `BIND_VOICE_INTERACTION`). `AssistIntentActivity` is a secondary `ACTION_ASSIST` entry point. `NoOpRecognitionService` exists only to satisfy the recognition-service requirement of holding the assistant role. The session's `onShow` starts `RecordingService` and calls `hide()` immediately — no window is ever shown.
-- **`capture/`** — `RecordingService` (foreground service, `foregroundServiceType="microphone"`) owns one capture end-to-end: it is NOT torn down when the screen locks or the phone is pocketed, unlike an Activity. `AudioRecorder` captures 16 kHz mono PCM16 and stops on ~5s of RMS silence, the user turning off the screen, a screen tap (`TapToStopActivity`, a transparent accelerator that nothing else depends on), or a 3-minute hard cap. Screen-off is the happy path: pocketing the phone is the real "I'm done" gesture *and* the thing that buries the mic in fabric noise, so silence detection alone never fires there — it is now only the walk-away backstop. The receiver lives in `RecordingService` (registered per capture, since captures overlap) rather than the overlay, and `TapToStopActivity` sets `FLAG_KEEP_SCREEN_ON` so a screen-off is always a deliberate power press and never an idle timeout. `Haptics` is the entire user-facing interface — three distinguishable patterns (start tick, stop buzz, at-risk rumble), no visuals. `CaptureEvents`/`CaptureController` coordinate the tap-to-stop overlay with the in-progress recording.
-- **`vault/`** — two storage tiers on purpose. Finished `.md` notes go to a user-selected folder over the Storage Access Framework: `VaultFolderSelector` takes a persistable grant from the `ACTION_OPEN_DOCUMENT_TREE` picker, `VaultGrant` stores it, and `SafVaultStorage` (behind the `VaultStorage` interface, so unit tests pass a JVM fake) does the reads/writes. A capture's `.wav` and its `.log` diagnostic instead wait as plain `java.io.File`s in `context.filesDir/pending/`: whisper needs a real filesystem path, and orphan/partial audio must never appear in the user's synced vault. Both tiers write temp-then-rename (`AtomicFileWriter` for the pending files, `SafVaultStorage`'s own temp-document-then-rename for notes), because the vault may be live-synced by Obsidian Sync/Syncthing and a partial file must never be observed mid-write. `VaultAccess` distinguishes NotConfigured (never picked a folder) from Lost (picked one, grant no longer resolves) so first-run and recovery are never confused. The pending-audio-before-note ordering is the actual data-loss defense in this app; everything after the WAV lands in `pending/` is considered recoverable.
-- **`transcribe/`** — `Transcriber` is a one-method interface wrapping the `whisper-android` AAR (`WhisperTranscriber`); this indirection exists so the AAR can be swapped for vendored whisper.cpp source without touching callers. `TranscriptionQueue` is a singleton object (not a class) that serializes all transcription through a `Mutex`, loads the model lazily/concurrently with recording, and releases it once the queue drains to zero — recording and transcription must never assume they are the only capture in flight, since a new capture triggered mid-transcription is queued, not refused. `ModelProvisioner` owns the model's location and readiness in `filesDir` (whisper needs a real filesystem path), gated on a `.complete` marker — the `.bin` exists on disk while still being written, so its presence alone proves nothing. It also deletes any previously downloaded `ggml-*` model, which otherwise strands ~57 MB on the device every time the model is swapped. `ModelDownloader` fetches the GGML model (`ggml-base.en-q5_1.bin`, ~57 MB) from `Config.MODEL_DOWNLOAD_URL` on first launch — it is deliberately **not** in `assets/` or in git — writing to a temp file and renaming into place only after both the pinned byte count and SHA-256 match. Until it lands, transcription failing is the *expected* state: captures still record and wait in `pending/`, and `MainActivity` re-runs the retry scan the moment the download completes.
-- **`notify/`** — `CaptureNotifications` owns the foreground-service status notification and failure notifications. The notification is load-bearing, not decorative: it's the only durable way to report a failure the user might miss (e.g. a buzz that fires while the phone is in a pocket during a conversation).
-- **`Config.kt`** (root package) — every tunable constant lives here: the pending-audio dir name (`pending`, under `filesDir`), sample rate, silence threshold/duration, max recording duration, model filenames/URL/digest, transcription language, and `NOTE_FRONTMATTER_TEMPLATE` (the YAML prepended to each note, `{{created}}` filled with the capture date). The vault folder is not here — it is chosen at runtime via SAF, not a hardcoded path. There is no settings UI; changing behavior means editing this file and rebuilding.
-- **`MainActivity`** — not a real UI. It exists only as a launcher entry point to request runtime permissions (`RECORD_AUDIO`, `POST_NOTIFICATIONS`), let the user pick the vault folder via the `ACTION_OPEN_DOCUMENT_TREE` picker, prompt to set Voice Vault as the device assistant, and show the first-launch model download. It also re-runs the pending-capture retry scan when a folder becomes reachable or the model finishes downloading.
-- **`quicknote/`** — a second, typed entry point that shares the vault pipeline. `QuickNoteWidgetProvider` puts a home-screen widget that launches `QuickNoteActivity`, a minimal Compose text box that writes a note through the same `VaultWriter` (same capture-id scheme and frontmatter) and lists recent notes. This is the portable fallback on phones where the OEM won't route the power-button/assist gesture to the app.
+- `assistant/` owns system assistant integration. The recognition service stub satisfies Android's assistant role contract; it does not transcribe.
+- `capture/` owns microphone, haptics, audio focus and stop conditions. Recording stops on screen-off, a tap, five seconds of RMS silence or a three-minute cap.
+- `audio/OpusEncoder` uses Android MediaCodec and MediaMuxer. No bundled codec library.
+- `audio/AudioExportQueue` serializes exports while recording remains independent. Missing files are already handled; existing final output makes interrupted retries idempotent.
+- `vault/` owns pending files, SAF grants, atomic document writes and timestamp naming. Existing preference keys remain to preserve folder selection on upgrade.
+- `notify/` reports recording status and persistent export/folder errors.
+- `MainActivity` requests microphone/notification permissions, selects an output folder and sets the assistant role. Launch and folder selection retry pending audio.
+- `quicknote/` is an independent typed Markdown feature. Its widget does not record audio. Existing text notes are preserved.
+- `Config.kt` contains capture constants, Opus bitrate and typed-note frontmatter.
 
-### Key invariants to preserve when touching this code
+## Invariants
 
-- The start haptic must fire only *after* `AudioRecord` is confirmed capturing (an earlier tick clips the first spoken word).
-- Audio must be durably written to `filesDir/pending/` before transcription is attempted — never reorder this.
-- `TranscriptionQueue` and `RecordingService` must keep supporting overlapping/queued captures; don't reintroduce a singleton assumption.
-- Whisper does not return an empty string for silence/noise — it returns bracketed placeholders like `[ Pause ]`, `[Silence]`, `[BLANK_AUDIO]`. `TranscriptionQueue.isNonSpeechPlaceholder` filters these; treat this as the actual "no real speech" check, not `text.isBlank()`.
-- Every write to the vault is atomic (temp file/document + rename), never a direct write: pending audio and diagnostics through `AtomicFileWriter`, notes through `SafVaultStorage`. A sync client must never observe a partial file.
-- `FLAG_KEEP_SCREEN_ON` on the overlay and the screen-off stop are a pair: removing the flag makes an idle display timeout indistinguishable from a deliberate power press, and silently cuts recordings short mid-thought.
+- Start haptic fires only after AudioRecord is capturing.
+- Persist WAV before encoding/export. Never delete pending audio on failure.
+- Output writes use temporary document plus rename, never a direct write to the final name.
+- Recording must remain usable while prior export runs. Names must not collide with pending WAV, existing Ogg or typed notes.
+- Keep screen-off stop and overlay FLAG_KEEP_SCREEN_ON together.
+- Audio focus is reference-counted across recordings and released before export.
+- Do not reintroduce transcription, network access or model downloads.
 
-### Non-goals (by design, not by omission)
-
-No settings/config UI, no note editing, no streaming/partial transcripts, no multi-language support (the build targets exactly one language, English, via `Config.TRANSCRIPTION_LANGUAGE` plus an `.en` model; a non-English build additionally requires swapping in a multilingual model, and Romanian was tried and rejected on quality), and no ABI beyond `arm64-v8a`. The app is Pixel-first, not Pixel-only: it should install and run on other recent `arm64-v8a` phones, but only the Pixel 6 Pro is verified, and the power-button trigger depends on the OS routing the assist gesture to the app, which many OEM skins refuse (the Quick Note widget is the fallback there). See the README's "Requirements and scope" for the user-facing version.
-
-The one exception to "no network": the app holds `INTERNET` solely so `ModelDownloader` can fetch the ~57 MB model once on first launch, keeping it out of the APK and the repo. Capture and transcription themselves never touch the network, and no audio, transcript, or telemetry is ever sent anywhere. This supersedes the archived `offline-transcription` spec's "SHALL NOT declare the `INTERNET` permission" requirement — that spec has not been re-proposed yet.
+Distribution remains a signed APK through `.github/workflows/release.yml`. This repository has no PR/test CI. Device gesture, playback and haptic checks require a physical device.
